@@ -10,14 +10,14 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-/* ---------------- CACHE ---------------- */
+/* CACHE */
 let navCache = { data: null, timestamp: null };
 let historyCache = {};
 
 const NAV_CACHE_DURATION = 4 * 60 * 60 * 1000;
 const HISTORY_CACHE_DURATION = 12 * 60 * 60 * 1000;
 
-/* ---------------- FETCH NAV ---------------- */
+/* FETCH NAV */
 async function fetchNAVData() {
   const now = Date.now();
 
@@ -26,44 +26,36 @@ async function fetchNAVData() {
   }
 
   try {
-    const response = await axios.get(
-      'https://www.amfiindia.com/spages/NAVAll.txt'
-    );
+    const res = await axios.get('https://www.amfiindia.com/spages/NAVAll.txt');
+    const lines = res.data.split('\n');
 
-    const lines = response.data.split('\n');
-    const funds = [];
-    let currentSchemeType = '';
+    let funds = [];
+    let currentType = '';
 
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
+    for (let line of lines) {
+      const t = line.trim();
+      if (!t) continue;
 
-      if (
-        trimmed.startsWith('Open Ended') ||
-        trimmed.startsWith('Close Ended') ||
-        trimmed.startsWith('Interval')
-      ) {
-        currentSchemeType = trimmed;
+      if (t.startsWith('Open Ended') || t.startsWith('Close Ended')) {
+        currentType = t;
         continue;
       }
 
-      if (trimmed.startsWith('Scheme Code')) continue;
+      if (t.startsWith('Scheme Code')) continue;
 
-      const parts = trimmed.split(';');
+      const p = t.split(';');
 
-      if (parts.length >= 6) {
-        const nav = parseFloat(parts[4]);
-
+      if (p.length >= 6) {
+        const nav = parseFloat(p[4]);
         if (!isNaN(nav)) {
-          const name = parts[3]?.trim() || parts[1]?.trim();
+          const name = p[3] || p[1];
 
           funds.push({
-            schemeCode: parts[0],
+            schemeCode: p[0],
             schemeName: name,
             nav,
-            date: parts[5],
-            schemeType: currentSchemeType,
-            category: categorize(currentSchemeType, name)
+            date: p[5],
+            category: categorize(currentType, name)
           });
         }
       }
@@ -72,46 +64,37 @@ async function fetchNAVData() {
     navCache = { data: funds, timestamp: now };
     return funds;
 
-  } catch (err) {
+  } catch {
     return navCache.data || [];
   }
 }
 
-/* ---------------- CATEGORY ---------------- */
+/* CATEGORY */
 function categorize(type, name) {
   const s = (type + name).toLowerCase();
-
-  if (s.includes('large cap')) return 'large-cap';
-  if (s.includes('mid cap')) return 'mid-cap';
   if (s.includes('small cap')) return 'small-cap';
-  if (s.includes('flexi cap')) return 'flexi-cap';
-  if (s.includes('multi cap')) return 'multi-cap';
+  if (s.includes('mid cap')) return 'mid-cap';
+  if (s.includes('large cap')) return 'large-cap';
+  if (s.includes('flexi')) return 'flexi-cap';
+  if (s.includes('multi')) return 'multi-cap';
   if (s.includes('elss')) return 'elss';
   if (s.includes('debt') || s.includes('bond')) return 'debt';
-
   return 'others';
 }
 
-/* ---------------- FETCH HISTORY ---------------- */
-async function fetchHistory(schemeCode) {
+/* HISTORY */
+async function fetchHistory(code) {
   const now = Date.now();
 
-  if (
-    historyCache[schemeCode] &&
-    (now - historyCache[schemeCode].timestamp) < HISTORY_CACHE_DURATION
-  ) {
-    return historyCache[schemeCode].data;
+  if (historyCache[code] && now - historyCache[code].timestamp < HISTORY_CACHE_DURATION) {
+    return historyCache[code].data;
   }
 
   try {
-    const res = await axios.get(`https://api.mfapi.in/mf/${schemeCode}`);
+    const res = await axios.get(`https://api.mfapi.in/mf/${code}`);
     const data = res.data.data || [];
 
-    historyCache[schemeCode] = {
-      data,
-      timestamp: now
-    };
-
+    historyCache[code] = { data, timestamp: now };
     return data;
 
   } catch {
@@ -119,97 +102,83 @@ async function fetchHistory(schemeCode) {
   }
 }
 
-/* ---------------- DATE LOGIC FIX ---------------- */
+/* DATE FIX */
 function parseDate(str) {
-  const [dd, mm, yyyy] = str.split('-');
-  return new Date(`${yyyy}-${mm}-${dd}`);
+  const [d, m, y] = str.split('-');
+  return new Date(`${y}-${m}-${d}`);
 }
 
-function findNavByDate(history, targetDate) {
-  for (let i = 0; i < history.length; i++) {
-    const d = parseDate(history[i].date);
-
-    if (d <= targetDate) {
-      return parseFloat(history[i].nav);
-    }
+function findNav(history, target) {
+  for (let h of history) {
+    if (parseDate(h.date) <= target) return parseFloat(h.nav);
   }
   return parseFloat(history[history.length - 1].nav);
 }
 
-/* ---------------- RETURNS ---------------- */
-function pct(latest, old) {
-  return ((latest - old) / old) * 100;
+/* RETURNS */
+function pct(a, b) {
+  return ((a - b) / b) * 100;
 }
 
-function cagr(latest, old, years) {
-  return (Math.pow(latest / old, 1 / years) - 1) * 100;
+function cagr(a, b, y) {
+  return (Math.pow(a / b, 1 / y) - 1) * 100;
 }
 
-async function generateReturnsReal(code, currentNav) {
-  const history = await fetchHistory(code);
+async function getReturns(code, nav) {
+  const h = await fetchHistory(code);
+  if (!h.length) return {};
 
-  if (!history.length) return {};
+  const now = new Date();
 
-  const today = new Date();
-
-  const getDate = (years = 0, months = 0) => {
-    const d = new Date(today);
-    d.setFullYear(d.getFullYear() - years);
-    d.setMonth(d.getMonth() - months);
-    return d;
+  const d = (y = 0, m = 0) => {
+    const t = new Date(now);
+    t.setFullYear(t.getFullYear() - y);
+    t.setMonth(t.getMonth() - m);
+    return t;
   };
-
-  const nav1m = findNavByDate(history, getDate(0, 1));
-  const nav3m = findNavByDate(history, getDate(0, 3));
-  const nav6m = findNavByDate(history, getDate(0, 6));
-  const nav1y = findNavByDate(history, getDate(1, 0));
-  const nav3y = findNavByDate(history, getDate(3, 0));
-  const nav5y = findNavByDate(history, getDate(5, 0));
 
   return {
-    returns_1m: pct(currentNav, nav1m).toFixed(2),
-    returns_3m: pct(currentNav, nav3m).toFixed(2),
-    returns_6m: pct(currentNav, nav6m).toFixed(2),
-    returns_1y: pct(currentNav, nav1y).toFixed(2),
-    returns_3y: cagr(currentNav, nav3y, 3).toFixed(2),
-    returns_5y: cagr(currentNav, nav5y, 5).toFixed(2),
-    expense_ratio: null
+    returns_1m: pct(nav, findNav(h, d(0,1))).toFixed(2),
+    returns_3m: pct(nav, findNav(h, d(0,3))).toFixed(2),
+    returns_6m: pct(nav, findNav(h, d(0,6))).toFixed(2),
+    returns_1y: pct(nav, findNav(h, d(1,0))).toFixed(2),
+    returns_3y: cagr(nav, findNav(h, d(3,0)), 3).toFixed(2),
+    returns_5y: cagr(nav, findNav(h, d(5,0)), 5).toFixed(2)
   };
 }
 
-/* ---------------- API ---------------- */
+/* API */
 app.get('/api/funds', async (req, res) => {
-  let funds = await fetchNAVData();
+  const funds = await fetchNAVData();
 
   const enriched = await Promise.all(
-    funds.slice(0, 20).map(async f => ({
+    funds.slice(0, 50).map(async f => ({
       ...f,
-      ...(await generateReturnsReal(f.schemeCode, f.nav))
+      ...(await getReturns(f.schemeCode, f.nav))
     }))
   );
 
-  res.json({ funds: enriched });
+  res.json({
+    total: funds.length,
+    funds: enriched
+  });
 });
 
 app.get('/api/funds/:code', async (req, res) => {
   const funds = await fetchNAVData();
-  const fund = funds.find(f => f.schemeCode === req.params.code);
+  const f = funds.find(x => x.schemeCode === req.params.code);
 
-  if (!fund) return res.status(404).json({ error: 'Not found' });
+  if (!f) return res.status(404).json({ error: 'Not found' });
 
-  const data = {
-    ...fund,
-    ...(await generateReturnsReal(fund.schemeCode, fund.nav))
-  };
-
-  res.json(data);
+  res.json({
+    ...f,
+    ...(await getReturns(f.schemeCode, f.nav))
+  });
 });
 
-/* ---------------- FRONTEND ---------------- */
+/* FRONTEND */
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log('Server running on port ' + PORT);
-});
+app.listen(PORT, () => console.log("Running on " + PORT));
